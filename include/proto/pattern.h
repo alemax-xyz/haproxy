@@ -194,7 +194,7 @@ int pat_ref_delete_by_id(struct pat_ref *ref, struct pat_ref_elt *refelt);
 void pat_ref_prune(struct pat_ref *ref);
 int pat_ref_load(struct pat_ref *ref, struct pattern_expr *expr, int patflags, int soe, char **err);
 void pat_ref_reload(struct pat_ref *ref, struct pat_ref *replace);
-
+int pat_ref_write_to_file_smp(struct pat_ref *ref, const char *filename, char **err);
 
 /*
  * pattern_head manipulation.

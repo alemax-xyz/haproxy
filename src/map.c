@@ -135,8 +135,10 @@ int sample_load_map(struct arg *arg, struct sample_conv *conv,
 	                            1, err, file, line))
 		return 0;
 
-	/* the maps of type IP have a string as defaultvalue. This
-	 * string canbe anipv4 or an ipv6, we must convert it.
+	desc->ref = pat_ref_lookup(arg[0].data.str.str);
+
+	/* the maps of type IP have a string as default value. This
+	 * string can be an ipv4 or an ipv6, we must convert it.
 	 */
 	if (desc->conv->out_type == SMP_T_ADDR) {
 		struct sample_data data;

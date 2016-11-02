@@ -57,8 +57,8 @@
  * macro is used only for identifying the function that can
  * not return because a longjmp is executed.
  *   __LJMP marks a prototype of hlua file that can use longjmp.
- *   WILL_LJMP() marks an lua function that will use longjmp.
- *   MAY_LJMP() marks an lua function that may use longjmp.
+ *   WILL_LJMP() marks a LUA function that will use longjmp.
+ *   MAY_LJMP() marks a LUA function that may use longjmp.
  */
 #define __LJMP
 #define WILL_LJMP(func) func
@@ -240,7 +240,7 @@ __LJMP static int hlua_http_get_headers(lua_State *L, struct hlua_txn *htxn, str
 			Alert(__fmt, ## __args); \
 	} while (0)
 
-/* Used to check an Lua function type in the stack. It creates and
+/* Used to check a LUA function type in the stack. It creates and
  * returns a reference of the function. This function throws an
  * error if the rgument is not a "function".
  */
@@ -377,7 +377,7 @@ static int hlua_arg2lua(lua_State *L, const struct arg *arg)
 	return 1;
 }
 
-/* This function take one entrie in an LUA stack at the index "ud",
+/* This function take one entrie in a LUA stack at the index "ud",
  * and try to convert it in an HAProxy argument entry. This is useful
  * with sample fetch wrappers. The input arguments are gived to the
  * lua wrapper and converted as arg list by thi function.
@@ -512,7 +512,7 @@ static int hlua_smp2lua_str(lua_State *L, struct sample *smp)
 	return 1;
 }
 
-/* the following functions are used to convert an Lua type in a
+/* the following functions are used to convert a LUA type in a
  * struct sample. This is useful to provide data from a converter
  * to the LUA code.
  */
@@ -758,7 +758,7 @@ __LJMP int hlua_lua2arg_check(lua_State *L, int first, struct arg *argp,
  * The following functions are used to make correspondance between the the
  * executed lua pointer and the "struct hlua *" that contain the context.
  *
- *  - hlua_gethlua : return the hlua context associated with an lua_State.
+ *  - hlua_gethlua : return the hlua context associated with a lua_State.
  *  - hlua_sethlua : create the association between hlua context and lua_state.
  */
 static inline struct hlua *hlua_gethlua(lua_State *L)
@@ -829,7 +829,7 @@ __LJMP void hlua_yieldk(lua_State *L, int nresults, int ctx,
 
 /* This function initialises the Lua environment stored in the stream.
  * It must be called at the start of the stream. This function creates
- * an LUA coroutine. It can not be use to crete the main LUA context.
+ * a LUA coroutine. It can not be use to crete the main LUA context.
  *
  * This function is particular. it initialises a new Lua thread. If the
  * initialisation fails (example: out of memory error), the lua function
@@ -1175,7 +1175,7 @@ __LJMP static int hlua_done(lua_State *L)
 	return 0;
 }
 
-/* This function is an LUA binding. It provides a function
+/* This function is a LUA binding. It provides a function
  * for deleting ACL from a referenced ACL file.
  */
 __LJMP static int hlua_del_acl(lua_State *L)
@@ -1197,10 +1197,10 @@ __LJMP static int hlua_del_acl(lua_State *L)
 	return 0;
 }
 
-/* This function is an LUA binding. It provides a function
+/* This function is a LUA binding. It provides a function
  * for deleting map entry from a referenced map file.
  */
-static int hlua_del_map(lua_State *L)
+__LJMP static int hlua_del_map(lua_State *L)
 {
 	const char *name;
 	const char *key;
@@ -1219,10 +1219,10 @@ static int hlua_del_map(lua_State *L)
 	return 0;
 }
 
-/* This function is an LUA binding. It provides a function
+/* This function is a LUA binding. It provides a function
  * for adding ACL pattern from a referenced ACL file.
  */
-static int hlua_add_acl(lua_State *L)
+__LJMP static int hlua_add_acl(lua_State *L)
 {
 	const char *name;
 	const char *key;
@@ -1242,11 +1242,11 @@ static int hlua_add_acl(lua_State *L)
 	return 0;
 }
 
-/* This function is an LUA binding. It provides a function
+/* This function is a LUA binding. It provides a function
  * for setting map pattern and sample from a referenced map
  * file.
  */
-static int hlua_set_map(lua_State *L)
+__LJMP static int hlua_set_map(lua_State *L)
 {
 	const char *name;
 	const char *key;
@@ -1270,9 +1270,195 @@ static int hlua_set_map(lua_State *L)
 	return 0;
 }
 
-/* A class is a lot of memory that contain data. This data can be a table,
+/* This function is a LUA binding. It provides a function
+ * for clearing all map patterns and samples from a referenced map
+ * file.
+ */
+__LJMP static int hlua_clear_map(lua_State *L)
+{
+	const char *name;
+	struct pat_ref *ref;
+
+	MAY_LJMP(check_args(L, 1, "clear"));
+
+	name = MAY_LJMP(luaL_checkstring(L, 1));
+
+	ref = pat_ref_lookup(name);
+	if (!ref)
+		WILL_LJMP(luaL_error(L, "'clear': unknown map file '%s'", name));
+
+	pat_ref_prune(ref);
+	return 0;
+}
+
+/* This function is a LUA binding. It provides a function
+ * for storing all map patterns and samples to a referenced map
+ * file.
+ */
+__LJMP static int hlua_store_map(lua_State *L)
+{
+	const char *name;
+	struct pat_ref *ref;
+	char *err = NULL;
+
+	MAY_LJMP(check_args(L, 1, "store_map"));
+
+	name = MAY_LJMP(luaL_checkstring(L, 1));
+
+	ref = pat_ref_lookup(name);
+	if (!ref)
+		WILL_LJMP(luaL_error(L, "'store_map': unknown map file '%s'", name));
+
+	if (!pat_ref_write_to_file_smp(ref, name, &err)) {
+		/* error case: we cant use luaL_error because we must
+		 * free the err variable.
+		 */
+		luaL_where(L, 1);
+		lua_pushfstring(L, "'store_map': %s.", err);
+		lua_concat(L, 2);
+		free(err);
+		WILL_LJMP(lua_error(L));
+	}
+	return 0;
+}
+
+static int _hlua_map_list(lua_State *L, struct pat_ref *ref, lua_Integer start, lua_Integer length)
+{
+	struct pat_ref_elt *elt;
+
+	lua_newtable(L);
+
+	if (start == 0) {
+		if (length == 0) {
+			list_for_each_entry(elt, &ref->head, list) {
+				lua_pushstring(L, elt->pattern);
+				lua_pushstring(L, elt->sample);
+				lua_rawset(L, -3);
+			}
+		} else if (length > 0) {
+			list_for_each_entry(elt, &ref->head, list) {
+				lua_pushstring(L, elt->pattern);
+				lua_pushstring(L, elt->sample);
+				lua_rawset(L, -3);
+				length--;
+				if (length == 0)
+					break;
+			}
+		}
+	} else if (start > 0) {
+		if (length == 0) {
+			list_for_each_entry(elt, &ref->head, list) {
+				if (start > 0) {
+					start--;
+					continue;
+				}
+				lua_pushstring(L, elt->pattern);
+				lua_pushstring(L, elt->sample);
+				lua_rawset(L, -3);
+			}
+		} else if (length > 0) {
+			list_for_each_entry(elt, &ref->head, list) {
+				if (start > 0) {
+					start--;
+					continue;
+				}
+				lua_pushstring(L, elt->pattern);
+				lua_pushstring(L, elt->sample);
+				lua_rawset(L, -3);
+				length--;
+				if (length == 0)
+					break;
+			}
+		}
+	}
+
+	return 1;
+}
+
+/* This function is a LUA binding. It provides a function
+ * for listing map patterns and samples to a referenced map
+ * file.
+ * If first argument (start) is non-negative, the returned table will start
+ * at the start'th position, counting from zero.
+ * If second argument (length) is given and is positive, the table returned
+ * will contain at most length elements beginning from start.
+ */
+__LJMP static int hlua_list_map(lua_State *L)
+{
+	const char *name;
+	lua_Integer start;
+	lua_Integer length;
+	struct pat_ref *ref;
+
+	if (lua_gettop(L) < 1 || lua_gettop(L) > 3)
+		WILL_LJMP(luaL_error(L, "'list_map' needs at least 1 argument."));
+
+	name = MAY_LJMP(luaL_checkstring(L, 1));
+	start = MAY_LJMP(luaL_optinteger(L, 2, 0));
+	length = MAY_LJMP(luaL_optinteger(L, 3, 0));
+
+	ref = pat_ref_lookup(name);
+	if (!ref)
+		WILL_LJMP(luaL_error(L, "'list_map': unknown map file '%s'", name));
+
+	return _hlua_map_list(L, ref, start, length);
+}
+
+void _hlua_table_ref(lua_State *L, struct pat_ref *ref) {
+	lua_pushstring(L, "reference");
+	lua_pushstring(L, ref->reference);
+	lua_rawset(L, -3);
+
+	lua_pushstring(L, "id");
+	lua_pushnumber(L, ref->unique_id);
+	lua_rawset(L, -3);
+
+	lua_pushstring(L, "flags");
+	lua_pushnumber(L, ref->flags);
+	lua_rawset(L, -3);
+}
+
+/* This function is a LUA binding. It provides a function
+ * for listing registered maps and their properties.
+ * If argument is given and not nil, function will return a map with
+ * provided unique identifier or associated filename. Returns nil if
+ * requested map does not exist.
+ * If argument is omitted or nil, all maps will be returned as a table.
+ */
+__LJMP static int hlua_list_maps(lua_State *L)
+{
+	struct pat_ref *ref;
+
+	if (lua_gettop(L) > 1)
+		WILL_LJMP(luaL_error(L, "'list_maps' needs at most 1 argument."));
+
+	if (lua_gettop(L) == 1 && !lua_isnil(L, 1)) {
+			ref = lua_isnumber(L, 1) ?
+				pat_ref_lookupid(MAY_LJMP(luaL_checkinteger(L, 1))) :
+				pat_ref_lookup(MAY_LJMP(luaL_checkstring(L, 1)));
+
+		if (ref) {
+			lua_newtable(L);
+			_hlua_table_ref(L, ref);
+		} else {
+			lua_pushnil(L);
+		}
+	} else {
+		lua_newtable(L);
+		list_for_each_entry(ref, &pattern_reference, list) {
+			lua_pushnumber(L, ref->unique_id);
+			lua_newtable(L);
+			_hlua_table_ref(L, ref);
+			lua_rawset(L, -3);
+		}
+	}
+
+	return 1;
+}
+
+/* A class is a lot of memory that contains data. This data can be a table,
  * an integer or user data. This data is associated with a metatable. This
- * metatable have an original version registred in the global context with
+ * metatable has an original version registred in the global context with
  * the name of the object (_G[<name>] = <metable> ).
  *
  * A metable is a table that modify the standard behavior of a standard
@@ -1504,6 +1690,136 @@ __LJMP static int hlua_map_lookup(struct lua_State *L)
 __LJMP static int hlua_map_slookup(struct lua_State *L)
 {
 	return _hlua_map_lookup(L, 1);
+}
+
+/* This function sets a map entry value.
+ */
+__LJMP static int hlua_map_set(lua_State *L)
+{
+	struct map_descriptor *desc;
+	const char *key;
+	const char *value;
+
+	MAY_LJMP(check_args(L, 3, "set"));
+
+	desc = MAY_LJMP(hlua_checkmap(L, 1));
+	key = MAY_LJMP(luaL_checkstring(L, 2));
+	value = MAY_LJMP(luaL_checkstring(L, 3));
+
+	if (pat_ref_find_elt(desc->ref, key) != NULL)
+		pat_ref_set(desc->ref, key, value, NULL);
+	else
+		pat_ref_add(desc->ref, key, value, NULL);
+	return 0;
+}
+
+/* This function deletes a map entry.
+ */
+__LJMP static int hlua_map_del(lua_State *L)
+{
+	struct map_descriptor *desc;
+	const char *key;
+
+	MAY_LJMP(check_args(L, 2, "del"));
+
+	desc = MAY_LJMP(hlua_checkmap(L, 1));
+	key = MAY_LJMP(luaL_checkstring(L, 2));
+
+	pat_ref_delete(desc->ref, key);
+	return 0;
+}
+
+/* This function clears all map patterns and samples.
+ */
+__LJMP static int hlua_map_clear(lua_State *L)
+{
+	struct map_descriptor *desc;
+
+	MAY_LJMP(check_args(L, 1, "clear"));
+
+	desc = MAY_LJMP(hlua_checkmap(L, 1));
+
+	pat_ref_prune(desc->ref);
+	return 0;
+}
+
+/* This function stores all patterns and samples to specified or referenced map
+ * file.
+ */
+__LJMP static int hlua_map_store(lua_State *L)
+{
+	struct map_descriptor *desc;
+	const char *filename;
+	char *err = NULL;
+
+	if (lua_gettop(L) < 1 || lua_gettop(L) > 2)
+		WILL_LJMP(luaL_error(L, "'store' needs at least 1 argument."));
+
+	desc = MAY_LJMP(hlua_checkmap(L, 1));
+	filename = MAY_LJMP(luaL_optstring(L, 2, desc->ref->reference));
+
+	if (!pat_ref_write_to_file_smp(desc->ref, filename, &err)) {
+		/* error case: we cant use luaL_error because we must
+		 * free the err variable.
+		 */
+		luaL_where(L, 1);
+		lua_pushfstring(L, "'store': %s.", err);
+		lua_concat(L, 2);
+		free(err);
+		WILL_LJMP(lua_error(L));
+	}
+
+	return 0;
+}
+
+/* This function returns a unique map identifier.
+ */
+__LJMP static int hlua_map_get_id(lua_State *L)
+{
+	struct map_descriptor *desc;
+
+	MAY_LJMP(check_args(L, 1, "get_id"));
+
+	desc = MAY_LJMP(hlua_checkmap(L, 1));
+
+	lua_pushinteger(L, desc->ref->unique_id);
+	return 1;
+}
+
+/* This function returns a referenced map file.
+ */
+__LJMP static int hlua_map_get_reference(lua_State *L)
+{
+	struct map_descriptor *desc;
+
+	MAY_LJMP(check_args(L, 1, "get_reference"));
+
+	desc = MAY_LJMP(hlua_checkmap(L, 1));
+
+	lua_pushstring(L, desc->ref->reference);
+	return 1;
+}
+
+/* This function allows listing patterns and samples of the map object.
+ * If first argument (start) is non-negative, the returned table will start
+ * at the start'th position, counting from zero.
+ * If second argument (length) is given and is positive, the table returned
+ * will contain at most length elements beginning from start.
+ */
+__LJMP static int hlua_map_list(lua_State *L)
+{
+	struct map_descriptor *desc;
+	lua_Integer start;
+	lua_Integer length;
+
+	if (lua_gettop(L) < 1 || lua_gettop(L) > 3)
+		WILL_LJMP(luaL_error(L, "'list' needs at least 1 argument."));
+
+	desc = MAY_LJMP(hlua_checkmap(L, 1));
+	start = MAY_LJMP(luaL_optinteger(L, 2, 0));
+	length = MAY_LJMP(luaL_optinteger(L, 3, 0));
+
+	return _hlua_map_list(L, desc->ref, start, length);
 }
 
 /*
@@ -2919,7 +3235,7 @@ static int hlua_fetches_new(lua_State *L, struct hlua_txn *txn, unsigned int fla
 	return 1;
 }
 
-/* This function is an LUA binding. It is called with each sample-fetch.
+/* This function is a LUA binding. It is called with each sample-fetch.
  * It uses closure argument to store the associated sample-fetch. It
  * returns only one argument or throws an error. An error is thrown
  * only if an error is encountered during the argument parsing. If
@@ -3033,7 +3349,7 @@ static int hlua_converters_new(lua_State *L, struct hlua_txn *txn, unsigned int 
 	return 1;
 }
 
-/* This function is an LUA binding. It is called with each converter.
+/* This function is a LUA binding. It is called with each converter.
  * It uses closure argument to store the associated converter. It
  * returns only one argument or throws an error. An error is thrown
  * only if an error is encountered during the argument parsing. If
@@ -4443,7 +4759,7 @@ static int hlua_http_res_set_hdr(lua_State *L)
 	return hlua_http_add_hdr(L, htxn, &htxn->s->txn->rsp);
 }
 
-/* This function set the method. */
+/* This function sets the method. */
 static int hlua_http_req_set_meth(lua_State *L)
 {
 	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
@@ -4460,7 +4776,19 @@ static int hlua_http_req_set_meth(lua_State *L)
 	return 1;
 }
 
-/* This function set the method. */
+/* This function gets the method. */
+static int hlua_http_req_get_meth(lua_State *L)
+{
+	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
+	struct stream *s = htxn->s;
+	struct http_txn *txn = s->txn;
+	const char *path = s->req.buf->p;
+
+	lua_pushlstring(L, path, txn->req.sl.rq.m_l);
+	return 1;
+}
+
+/* This function sets the path. */
 static int hlua_http_req_set_path(lua_State *L)
 {
 	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
@@ -4477,7 +4805,26 @@ static int hlua_http_req_set_path(lua_State *L)
 	return 1;
 }
 
-/* This function set the query-string. */
+/* This function gets the path. */
+static int hlua_http_req_get_path(lua_State *L)
+{
+	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
+	struct http_txn *txn = htxn->s->txn;
+	const char *path;
+	const char *end;
+	const char *p;
+
+	path = http_get_path(txn);
+	end = txn->req.chn->buf->p + txn->req.sl.rq.u + txn->req.sl.rq.u_l;
+	p = path;
+	while (p < end && *p != '?')
+		p++;
+
+	lua_pushlstring(L, path, p - path);
+	return 1;
+}
+
+/* This function sets the query-string. */
 static int hlua_http_req_set_query(lua_State *L)
 {
 	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
@@ -4506,7 +4853,27 @@ static int hlua_http_req_set_query(lua_State *L)
 	return 1;
 }
 
-/* This function set the uri. */
+/* This function gets the query-string. */
+static int hlua_http_req_get_query(lua_State *L)
+{
+	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
+	struct http_txn *txn = htxn->s->txn;
+	const char *path;
+	const char *end;
+	const char *p;
+
+	path = http_get_path(txn);
+	end = txn->req.chn->buf->p + txn->req.sl.rq.u + txn->req.sl.rq.u_l;
+	p = path;
+	while (p < end && *p != '?')
+		p++;
+	if (*p == '?')
+		p++;
+	lua_pushlstring(L, p, end - p);
+	return 1;
+}
+
+/* This function sets the uri. */
 static int hlua_http_req_set_uri(lua_State *L)
 {
 	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
@@ -4523,7 +4890,19 @@ static int hlua_http_req_set_uri(lua_State *L)
 	return 1;
 }
 
-/* This function set the response code. */
+/* This function sets the uri. */
+static int hlua_http_req_get_uri(lua_State *L)
+{
+	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
+	struct stream *s = htxn->s;
+	struct http_txn *txn = s->txn;
+	const char *path = s->req.buf->p + txn->req.sl.rq.u;
+
+	lua_pushlstring(L, path, txn->req.sl.rq.u_l);
+	return 1;
+}
+
+/* This function sets the response code. */
 static int hlua_http_res_set_status(lua_State *L)
 {
 	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
@@ -4849,7 +5228,7 @@ __LJMP static int hlua_txn_set_mark(lua_State *L)
 	return 0;
 }
 
-/* This function is an Lua binding that send pending data
+/* This function is a LUA binding that send pending data
  * to the client, and close the stream interface.
  */
 __LJMP static int hlua_txn_done(lua_State *L)
@@ -5003,7 +5382,7 @@ __LJMP static int hlua_msleep(lua_State *L)
 	return 0;
 }
 
-/* This functionis an LUA binding. it permits to give back
+/* This functionis a LUA binding. it permits to give back
  * the hand at the HAProxy scheduler. It is used when the
  * LUA processing consumes a lot of time.
  */
@@ -5104,7 +5483,7 @@ static struct task *hlua_process_task(struct task *task)
 	return NULL;
 }
 
-/* This function is an LUA binding that register LUA function to be
+/* This function is a LUA binding that register LUA function to be
  * executed after the HAProxy configuration parsing and before the
  * HAProxy scheduler starts. This function expect only one LUA
  * argument that is a function. This function returns nothing, but
@@ -5128,7 +5507,7 @@ __LJMP static int hlua_register_init(lua_State *L)
 	return 0;
 }
 
-/* This functio is an LUA binding. It permits to register a task
+/* This functio is a LUA binding. It permits to register a task
  * executed in parallel of the main HAroxy activity. The task is
  * created and it is set in the HAProxy scheduler. It can be called
  * from the "init" section, "post init" or during the runtime.
@@ -5168,7 +5547,7 @@ static int hlua_register_task(lua_State *L)
 	return 0;
 }
 
-/* Wrapper called by HAProxy to execute an LUA converter. This wrapper
+/* Wrapper called by HAProxy to execute a LUA converter. This wrapper
  * doesn't allow "yield" functions because the HAProxy engine cannot
  * resume converters.
  */
@@ -5394,9 +5773,9 @@ static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp
 	}
 }
 
-/* This function is an LUA binding used for registering
+/* This function is a LUA binding used for registering
  * "sample-conv" functions. It expects a converter name used
- * in the haproxy configuration file, and an LUA function.
+ * in the haproxy configuration file, and a LUA function.
  */
 __LJMP static int hlua_register_converters(lua_State *L)
 {
@@ -5451,9 +5830,9 @@ __LJMP static int hlua_register_converters(lua_State *L)
 	return 0;
 }
 
-/* This fucntion is an LUA binding used for registering
+/* This fucntion is a LUA binding used for registering
  * "sample-fetch" functions. It expects a converter name used
- * in the haproxy configuration file, and an LUA function.
+ * in the haproxy configuration file, and a LUA function.
  */
 __LJMP static int hlua_register_fetches(lua_State *L)
 {
@@ -6107,9 +6486,9 @@ static void hlua_applet_http_release(struct appctx *ctx)
 }
 
 /* global {tcp|http}-request parser. Return ACT_RET_PRS_OK in
- * succes case, else return ACT_RET_PRS_ERR.
+ * success case, else return ACT_RET_PRS_ERR.
  *
- * This function can fail with an abort() due to an Lua critical error.
+ * This function can fail with an abort() due to a LUA critical error.
  * We are in the configuration parsing process of HAProxy, this abort() is
  * tolerated.
  */
@@ -6176,9 +6555,9 @@ static enum act_parse_ret action_register_service_http(const char **args, int *c
 	return ACT_RET_PRS_OK;
 }
 
-/* This function is an LUA binding used for registering
+/* This function is a LUA binding used for registering
  * "sample-conv" functions. It expects a converter name used
- * in the haproxy configuration file, and an LUA function.
+ * in the haproxy configuration file, and a LUA function.
  */
 __LJMP static int hlua_register_action(lua_State *L)
 {
@@ -6285,9 +6664,9 @@ static enum act_parse_ret action_register_service_tcp(const char **args, int *cu
 	return 0;
 }
 
-/* This function is an LUA binding used for registering
+/* This function is a LUA binding used for registering
  * "sample-conv" functions. It expects a converter name used
- * in the haproxy configuration file, and an LUA function.
+ * in the haproxy configuration file, and a LUA function.
  */
 __LJMP static int hlua_register_service(lua_State *L)
 {
@@ -6429,7 +6808,7 @@ static int hlua_parse_maxmem(char **args, int section_type, struct proxy *curpx,
 
 
 /* This function is called by the main configuration key "lua-load". It loads and
- * execute an lua file during the parsing of the HAProxy configuration file. It is
+ * execute a LUA file during the parsing of the HAProxy configuration file. It is
  * the main lua entry point.
  *
  * This funtion runs with the HAProxy keywords API. It returns -1 if an error is
@@ -6438,7 +6817,7 @@ static int hlua_parse_maxmem(char **args, int section_type, struct proxy *curpx,
  * In some error case, LUA set an error message in top of the stack. This function
  * returns this error message in the HAProxy logs and pop it from the stack.
  *
- * This function can fail with an abort() due to an Lua critical error.
+ * This function can fail with an abort() due to a LUA critical error.
  * We are in the configuration parsing process of HAProxy, this abort() is
  * tolerated.
  */
@@ -6496,7 +6875,7 @@ static struct cfg_kw_list cfg_kws = {{ },{
 	{ 0, NULL, NULL },
 }};
 
-/* This function can fail with an abort() due to an Lua critical error.
+/* This function can fail with an abort() due to a LUA critical error.
  * We are in the initialisation process of HAProxy, this abort() is
  * tolerated.
  */
@@ -6580,7 +6959,7 @@ static void *hlua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 	return ptr;
 }
 
-/* Ithis function can fail with an abort() due to an Lua critical error.
+/* Ithis function can fail with an abort() due to a LUA critical error.
  * We are in the initialisation process of HAProxy, this abort() is
  * tolerated.
  */
@@ -6668,6 +7047,10 @@ void hlua_init(void)
 	hlua_class_function(gL.T, "del_acl", hlua_del_acl);
 	hlua_class_function(gL.T, "set_map", hlua_set_map);
 	hlua_class_function(gL.T, "del_map", hlua_del_map);
+	hlua_class_function(gL.T, "clear_map", hlua_clear_map);
+	hlua_class_function(gL.T, "store_map", hlua_store_map);
+	hlua_class_function(gL.T, "list_map", hlua_list_map);
+	hlua_class_function(gL.T, "list_maps", hlua_list_maps);
 	hlua_class_function(gL.T, "tcp", hlua_socket_new);
 	hlua_class_function(gL.T, "log", hlua_log);
 	hlua_class_function(gL.T, "Debug", hlua_log_debug);
@@ -6692,19 +7075,30 @@ void hlua_init(void)
 	for (i=0; i<PAT_MATCH_NUM; i++)
 		hlua_class_const_int(gL.T, pat_match_names[i], i);
 
+	hlua_class_const_int(gL.T, "FLAG_MAP", PAT_REF_MAP);
+	hlua_class_const_int(gL.T, "FLAG_ACL", PAT_REF_ACL);
+	hlua_class_const_int(gL.T, "FLAG_SMP", PAT_REF_SMP);
+
 	/* register constructor. */
 	hlua_class_function(gL.T, "new", hlua_map_new);
 
 	/* Create and fill the metatable. */
 	lua_newtable(gL.T);
 
-	/* Create and fille the __index entry. */
+	/* Create and fill the __index entry. */
 	lua_pushstring(gL.T, "__index");
 	lua_newtable(gL.T);
 
 	/* Register . */
 	hlua_class_function(gL.T, "lookup", hlua_map_lookup);
 	hlua_class_function(gL.T, "slookup", hlua_map_slookup);
+	hlua_class_function(gL.T, "set", hlua_map_set);
+	hlua_class_function(gL.T, "del", hlua_map_del);
+	hlua_class_function(gL.T, "clear", hlua_map_clear);
+	hlua_class_function(gL.T, "store", hlua_map_store);
+	hlua_class_function(gL.T, "get_id", hlua_map_get_id);
+	hlua_class_function(gL.T, "get_reference", hlua_map_get_reference);
+	hlua_class_function(gL.T, "list", hlua_map_list);
 
 	lua_rawset(gL.T, -3);
 
@@ -6864,9 +7258,13 @@ void hlua_init(void)
 	hlua_class_function(gL.T, "req_add_header", hlua_http_req_add_hdr);
 	hlua_class_function(gL.T, "req_set_header", hlua_http_req_set_hdr);
 	hlua_class_function(gL.T, "req_set_method", hlua_http_req_set_meth);
+	hlua_class_function(gL.T, "req_get_method", hlua_http_req_get_meth);
 	hlua_class_function(gL.T, "req_set_path",   hlua_http_req_set_path);
+	hlua_class_function(gL.T, "req_get_path",   hlua_http_req_get_path);
 	hlua_class_function(gL.T, "req_set_query",  hlua_http_req_set_query);
+	hlua_class_function(gL.T, "req_get_query",  hlua_http_req_get_query);
 	hlua_class_function(gL.T, "req_set_uri",    hlua_http_req_set_uri);
+	hlua_class_function(gL.T, "req_get_uri",    hlua_http_req_get_uri);
 
 	hlua_class_function(gL.T, "res_get_headers",hlua_http_res_get_headers);
 	hlua_class_function(gL.T, "res_del_header", hlua_http_res_del_hdr);

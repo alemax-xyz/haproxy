@@ -28,6 +28,7 @@
 struct map_descriptor {
 	struct sample_conv *conv;      /* original converter descriptor */
 	struct pattern_head pat;       /* the pattern matching associated to the map */
+	struct pat_ref * ref;          /* the pattern reference */
 	int do_free;                   /* set if <pat> is the orignal pat and must be freed */
 };
 

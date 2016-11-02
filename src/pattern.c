@@ -2201,6 +2201,38 @@ int pat_ref_read_from_file_smp(struct pat_ref *ref, const char *filename, char *
 	return ret;
 }
 
+/* Writes patterns to a file. If <err_msg> is non-NULL, an error message will
+ * be returned there on errors and the caller will have to free it.
+ *
+ * Return non-zero in case of succes, otherwise 0.
+ */
+int pat_ref_write_to_file_smp(struct pat_ref *ref, const char *filename, char **err)
+{
+	struct pat_ref_elt *elt;
+	FILE *file;
+	int ret = 0;
+
+	file = fopen(filename, "w");
+	if (!file) {
+		memprintf(err, "failed to open pattern file <%s>", filename);
+		return 0;
+	}
+
+	list_for_each_entry(elt, &ref->head, list) {
+		if (fprintf(file, "%s\t%s\n", elt->pattern, elt->sample) <= 0) {
+			memprintf(err, "failed to write to pattern file <%s>", filename);
+			goto out_close;
+		}
+	}
+
+	/* succes */
+	ret = 1;
+
+ out_close:
+	fclose(file);
+	return ret;
+}
+
 /* Reads patterns from a file. If <err_msg> is non-NULL, an error message will
  * be returned there on errors and the caller will have to free it.
  */
