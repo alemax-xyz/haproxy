@@ -56,7 +56,7 @@ unsigned int error_snapshot_id = 0;     /* global ID assigned to each error then
 /*
  * This function returns a string containing a name describing capabilities to
  * report comprehensible error messages. Specifically, it will return the words
- * "frontend", "backend", "ruleset" when appropriate, or "proxy" for all other
+ * "frontend", "backend" when appropriate, or "proxy" for all other
  * cases including the proxies declared in "listen" mode.
  */
 const char *proxy_cap_str(int cap)
@@ -66,8 +66,6 @@ const char *proxy_cap_str(int cap)
 			return "frontend";
 		else if (cap & PR_CAP_BE)
 			return "backend";
-		else if (cap & PR_CAP_RS)
-			return "ruleset";
 	}
 	return "proxy";
 }
@@ -1133,14 +1131,15 @@ int stream_set_backend(struct stream *s, struct proxy *be)
 {
 	if (s->flags & SF_BE_ASSIGNED)
 		return 1;
+
+	if (flt_set_stream_backend(s, be) < 0)
+		return 0;
+
 	s->be = be;
 	be->beconn++;
 	if (be->beconn > be->be_counters.conn_max)
 		be->be_counters.conn_max = be->beconn;
 	proxy_inc_be_ctr(be);
-
-	if (flt_set_stream_backend(s, be) < 0)
-		return 0;
 
 	/* assign new parameters to the stream from the new backend */
 	s->si[1].flags &= ~SI_FL_INDEP_STR;

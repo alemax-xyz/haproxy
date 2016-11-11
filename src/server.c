@@ -34,6 +34,7 @@
 #include <proto/dns.h>
 
 static void srv_update_state(struct server *srv, int version, char **params);
+static int srv_apply_lastaddr(struct server *srv, int *err_code);
 
 /* List head of all known server keywords */
 static struct srv_kw_list srv_keywords = {
@@ -394,9 +395,10 @@ void srv_set_stopping(struct server *s, const char *reason)
  * one flag at once. The equivalent "inherited" flag is propagated to all
  * tracking servers. Maintenance mode disables health checks (but not agent
  * checks). When either the flag is already set or no flag is passed, nothing
- * is done.
+ * is done. If <cause> is non-null, it will be displayed at the end of the log
+ * lines to justify the state change.
  */
-void srv_set_admin_flag(struct server *s, enum srv_admin mode)
+void srv_set_admin_flag(struct server *s, enum srv_admin mode, const char *cause)
 {
 	struct check *check = &s->check;
 	struct server *srv;
@@ -425,13 +427,16 @@ void srv_set_admin_flag(struct server *s, enum srv_admin mode)
 
 		if (s->state == SRV_ST_STOPPED) {	/* server was already down */
 			chunk_printf(&trash,
-			             "%sServer %s/%s was DOWN and now enters maintenance",
-			             s->flags & SRV_F_BACKUP ? "Backup " : "", s->proxy->id, s->id);
+			             "%sServer %s/%s was DOWN and now enters maintenance%s%s%s",
+			             s->flags & SRV_F_BACKUP ? "Backup " : "", s->proxy->id, s->id,
+			             cause ? " (" : "", cause ? cause : "", cause ? ")" : "");
 
 			srv_append_status(&trash, s, NULL, -1, (mode & SRV_ADMF_FMAINT));
 
-			Warning("%s.\n", trash.str);
-			send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
+			if (!(global.mode & MODE_STARTING)) {
+				Warning("%s.\n", trash.str);
+				send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
+			}
 		}
 		else {	/* server was still running */
 			int srv_was_stopping = (s->state == SRV_ST_STOPPING) || (s->admin & SRV_ADMF_DRAIN);
@@ -453,14 +458,17 @@ void srv_set_admin_flag(struct server *s, enum srv_admin mode)
 			xferred = pendconn_redistribute(s);
 
 			chunk_printf(&trash,
-			             "%sServer %s/%s is going DOWN for maintenance",
+			             "%sServer %s/%s is going DOWN for maintenance%s%s%s",
 			             s->flags & SRV_F_BACKUP ? "Backup " : "",
-			             s->proxy->id, s->id);
+			             s->proxy->id, s->id,
+			             cause ? " (" : "", cause ? cause : "", cause ? ")" : "");
 
 			srv_append_status(&trash, s, NULL, xferred, (mode & SRV_ADMF_FMAINT));
 
-			Warning("%s.\n", trash.str);
-			send_log(s->proxy, srv_was_stopping ? LOG_NOTICE : LOG_ALERT, "%s.\n", trash.str);
+			if (!(global.mode & MODE_STARTING)) {
+				Warning("%s.\n", trash.str);
+				send_log(s->proxy, srv_was_stopping ? LOG_NOTICE : LOG_ALERT, "%s.\n", trash.str);
+			}
 
 			if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
 				set_backend_down(s->proxy);
@@ -483,15 +491,17 @@ void srv_set_admin_flag(struct server *s, enum srv_admin mode)
 		 */
 		xferred = pendconn_redistribute(s);
 
-		chunk_printf(&trash, "%sServer %s/%s enters drain state",
-			     s->flags & SRV_F_BACKUP ? "Backup " : "", s->proxy->id, s->id);
+		chunk_printf(&trash, "%sServer %s/%s enters drain state%s%s%s",
+			     s->flags & SRV_F_BACKUP ? "Backup " : "", s->proxy->id, s->id,
+		             cause ? " (" : "", cause ? cause : "", cause ? ")" : "");
 
 		srv_append_status(&trash, s, NULL, xferred, (mode & SRV_ADMF_FDRAIN));
 
-		Warning("%s.\n", trash.str);
-		send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
-		send_email_alert(s, LOG_NOTICE, "%s", trash.str);
-
+		if (!(global.mode & MODE_STARTING)) {
+			Warning("%s.\n", trash.str);
+			send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
+			send_email_alert(s, LOG_NOTICE, "%s", trash.str);
+		}
 		if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
 			set_backend_down(s->proxy);
 	}
@@ -503,7 +513,7 @@ void srv_set_admin_flag(struct server *s, enum srv_admin mode)
 		mode = SRV_ADMF_IDRAIN;
 
 	for (srv = s->trackers; srv; srv = srv->tracknext)
-		srv_set_admin_flag(srv, mode);
+		srv_set_admin_flag(srv, mode, cause);
 }
 
 /* Disables admin flag <mode> (among SRV_ADMF_*) on server <s>. This is used to
@@ -536,6 +546,18 @@ void srv_clr_admin_flag(struct server *s, enum srv_admin mode)
 			             "%sServer %s/%s is leaving forced maintenance but remains in maintenance",
 			             s->flags & SRV_F_BACKUP ? "Backup " : "",
 			             s->proxy->id, s->id);
+
+			if (s->track) /* normally it's mandatory here */
+				chunk_appendf(&trash, " via %s/%s",
+				              s->track->proxy->id, s->track->id);
+			Warning("%s.\n", trash.str);
+			send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
+		}
+		if (mode & SRV_ADMF_RMAINT) {
+			chunk_printf(&trash,
+			             "%sServer %s/%s ('%s') resolves again but remains in maintenance",
+			             s->flags & SRV_F_BACKUP ? "Backup " : "",
+			             s->proxy->id, s->id, s->hostname);
 
 			if (s->track) /* normally it's mandatory here */
 				chunk_appendf(&trash, " via %s/%s",
@@ -623,6 +645,14 @@ void srv_clr_admin_flag(struct server *s, enum srv_admin mode)
 				     (s->state == SRV_ST_STOPPED) ? "DOWN" : "UP",
 				     (s->admin & SRV_ADMF_DRAIN) ? "DRAIN" : "READY");
 		}
+		else if (mode & SRV_ADMF_RMAINT) {
+			chunk_printf(&trash,
+				     "%sServer %s/%s ('%s') is %s/%s (resolves again)",
+				     s->flags & SRV_F_BACKUP ? "Backup " : "",
+				     s->proxy->id, s->id, s->hostname,
+				     (s->state == SRV_ST_STOPPED) ? "DOWN" : "UP",
+				     (s->admin & SRV_ADMF_DRAIN) ? "DRAIN" : "READY");
+		}
 		else {
 			chunk_printf(&trash,
 				     "%sServer %s/%s is %s/%s (leaving maintenance)",
@@ -703,6 +733,40 @@ void srv_clr_admin_flag(struct server *s, enum srv_admin mode)
 
 	for (srv = s->trackers; srv; srv = srv->tracknext)
 		srv_clr_admin_flag(srv, mode);
+}
+
+/* principle: propagate maint and drain to tracking servers. This is useful
+ * upon startup so that inherited states are correct.
+ */
+static void srv_propagate_admin_state(struct server *srv)
+{
+	struct server *srv2;
+
+	if (!srv->trackers)
+		return;
+
+	for (srv2 = srv->trackers; srv2; srv2 = srv2->tracknext) {
+		if (srv->admin & (SRV_ADMF_MAINT | SRV_ADMF_CMAINT))
+			srv_set_admin_flag(srv2, SRV_ADMF_IMAINT, NULL);
+
+		if (srv->admin & SRV_ADMF_DRAIN)
+			srv_set_admin_flag(srv2, SRV_ADMF_IDRAIN, NULL);
+	}
+}
+
+/* Compute and propagate the admin states for all servers in proxy <px>.
+ * Only servers *not* tracking another one are considered, because other
+ * ones will be handled when the server they track is visited.
+ */
+void srv_compute_all_admin_states(struct proxy *px)
+{
+	struct server *srv;
+
+	for (srv = px->srv; srv; srv = srv->next) {
+		if (srv->track)
+			continue;
+		srv_propagate_admin_state(srv);
+	}
 }
 
 /* Note: must not be declared <const> as its list will be overwritten.
@@ -934,7 +998,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			 *  - IP:+N => port=+N, relative
 			 *  - IP:-N => port=-N, relative
 			 */
-			sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, &fqdn, 1);
+			sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, &fqdn, 0);
 			if (!sk) {
 				Alert("parsing [%s:%d] : '%s %s' : %s\n", file, linenum, args[0], args[1], errmsg);
 				err_code |= ERR_ALERT | ERR_FATAL;
@@ -1049,6 +1113,8 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			       curproxy->defsrv.dns_opts.pref_net,
 			       sizeof(newsrv->dns_opts.pref_net));
 			newsrv->dns_opts.pref_net_nb = curproxy->defsrv.dns_opts.pref_net_nb;
+			newsrv->init_addr_methods = curproxy->defsrv.init_addr_methods;
+			newsrv->init_addr         = curproxy->defsrv.init_addr;
 
 			cur_arg = 3;
 		} else {
@@ -1095,6 +1161,55 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			else if (!defsrv && !strcmp(args[cur_arg], "cookie")) {
 				newsrv->cookie = strdup(args[cur_arg + 1]);
 				newsrv->cklen = strlen(args[cur_arg + 1]);
+				cur_arg += 2;
+			}
+			else if (!strcmp(args[cur_arg], "init-addr")) {
+				char *p, *end;
+				int done;
+				struct sockaddr_storage sa;
+
+				newsrv->init_addr_methods = 0;
+				memset(&newsrv->init_addr, 0, sizeof(newsrv->init_addr));
+
+				for (p = args[cur_arg + 1]; *p; p = end) {
+					/* cut on next comma */
+					for (end = p; *end && *end != ','; end++);
+					if (*end)
+						*(end++) = 0;
+
+					memset(&sa, 0, sizeof(sa));
+					if (!strcmp(p, "libc")) {
+						done = srv_append_initaddr(&newsrv->init_addr_methods, SRV_IADDR_LIBC);
+					}
+					else if (!strcmp(p, "last")) {
+						done = srv_append_initaddr(&newsrv->init_addr_methods, SRV_IADDR_LAST);
+					}
+					else if (!strcmp(p, "none")) {
+						done = srv_append_initaddr(&newsrv->init_addr_methods, SRV_IADDR_NONE);
+					}
+					else if (str2ip2(p, &sa, 0)) {
+						if (is_addr(&newsrv->init_addr)) {
+							Alert("parsing [%s:%d]: '%s' : initial address already specified, cannot add '%s'.\n",
+							      file, linenum, args[cur_arg], p);
+							err_code |= ERR_ALERT | ERR_FATAL;
+							goto out;
+						}
+						newsrv->init_addr = sa;
+						done = srv_append_initaddr(&newsrv->init_addr_methods, SRV_IADDR_IP);
+					}
+					else {
+						Alert("parsing [%s:%d]: '%s' : unknown init-addr method '%s', supported methods are 'libc', 'last', 'none'.\n",
+							file, linenum, args[cur_arg], p);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto out;
+					}
+					if (!done) {
+						Alert("parsing [%s:%d]: '%s' : too many init-addr methods when trying to add '%s'\n",
+							file, linenum, args[cur_arg], p);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto out;
+					}
+				}
 				cur_arg += 2;
 			}
 			else if (!defsrv && !strcmp(args[cur_arg], "redir")) {
@@ -2023,14 +2138,17 @@ static void srv_update_state(struct server *srv, int version, char **params)
 			p = NULL;
 			errno = 0;
 			srv_admin_state = strtol(params[2], &p, 10);
+
+			/* inherited statuses will be recomputed later */
+			srv_admin_state &= ~SRV_ADMF_IDRAIN & ~SRV_ADMF_IMAINT;
+
 			if ((p == params[2]) || errno == EINVAL || errno == ERANGE ||
 			    (srv_admin_state != 0 &&
 			     srv_admin_state != SRV_ADMF_FMAINT &&
-			     srv_admin_state != SRV_ADMF_IMAINT &&
 			     srv_admin_state != SRV_ADMF_CMAINT &&
 			     srv_admin_state != (SRV_ADMF_CMAINT | SRV_ADMF_FMAINT) &&
-			     srv_admin_state != SRV_ADMF_FDRAIN &&
-			     srv_admin_state != SRV_ADMF_IDRAIN)) {
+			     srv_admin_state != (SRV_ADMF_CMAINT | SRV_ADMF_FDRAIN) &&
+			     srv_admin_state != SRV_ADMF_FDRAIN)) {
 				chunk_appendf(msg, ", invalid srv_admin_state value '%s'", params[2]);
 			}
 
@@ -2161,15 +2279,23 @@ static void srv_update_state(struct server *srv, int version, char **params)
 			/* apply drain mode if server is currently enabled */
 			if (!(srv->admin & SRV_ADMF_FMAINT) && (srv_admin_state & SRV_ADMF_FDRAIN)) {
 				/* The SRV_ADMF_FDRAIN flag is inherited when srv->iweight is 0
-				 * (srv->iweight is the weight set up in configuration)
-				 * so we don't want to apply it when srv_iweight is 0 and
-				 * srv->iweight is greater than 0. Purpose is to give the
-				 * chance to the admin to re-enable this server from configuration
-				 * file by setting a new weight > 0.
+				 * (srv->iweight is the weight set up in configuration).
+				 * There are two possible reasons for FDRAIN to have been present :
+				 *   - previous config weight was zero
+				 *   - "set server b/s drain" was sent to the CLI
+				 *
+				 * In the first case, we simply want to drop this drain state
+				 * if the new weight is not zero anymore, meaning the administrator
+				 * has intentionally turned the weight back to a positive value to
+				 * enable the server again after an operation. In the second case,
+				 * the drain state was forced on the CLI regardless of the config's
+				 * weight so we don't want a change to the config weight to lose this
+				 * status. What this means is :
+				 *   - if previous weight was 0 and new one is >0, drop the DRAIN state.
+				 *   - if the previous weight was >0, keep it.
 				 */
-				if ((srv_iweight == 0) && (srv->iweight > 0)) {
+				if (srv_iweight > 0 || srv->iweight == 0)
 					srv_adm_set_drain(srv);
-				}
 			}
 
 			srv->last_change = date.tv_sec - srv_last_time_change;
@@ -2207,24 +2333,8 @@ static void srv_update_state(struct server *srv, int version, char **params)
 			}
 			server_recalc_eweight(srv);
 
-			/* update server IP only if DNS resolution is used on the server */
-			if (srv->resolution) {
-				struct sockaddr_storage addr;
-
-				memset(&addr, 0, sizeof(struct sockaddr_storage));
-
-				if (str2ip2(params[0], &addr, AF_UNSPEC)) {
-					int port;
-
-					/* save the port, applies the new IP then reconfigure the port */
-					port = get_host_port(&srv->addr);
-					srv->addr.ss_family = addr.ss_family;
-					str2ip2(params[0], &srv->addr, srv->addr.ss_family);
-					set_host_port(&srv->addr, port);
-				}
-				else
-					chunk_appendf(msg, ", can't parse IP: %s", params[0]);
-			}
+			/* load server IP address */
+			srv->lastaddr = strdup(params[0]);
 			break;
 		default:
 			chunk_appendf(msg, ", version '%d' not supported", version);
@@ -2667,25 +2777,16 @@ const char *update_server_addr_port(struct server *s, const char *addr, const ch
 			chunk_appendf(msg, "no need to change the addr");
 			goto port;
 		}
-		current_port = get_host_port(&s->addr);
-		memset(&s->addr, '\0', sizeof(s->addr));
 		ipcpy(&sa, &s->addr);
-		set_host_port(&s->addr, current_port);
 
 		/* we also need to update check's ADDR only if it uses the server's one */
 		if ((s->check.state & CHK_ST_CONFIGURED) && (s->flags & SRV_F_CHECKADDR)) {
-			current_port = get_host_port(&s->check.addr);
-			memset(&s->check.addr, '\0', sizeof(s->check.addr));
 			ipcpy(&sa, &s->check.addr);
-			set_host_port(&s->check.addr, current_port);
 		}
 
 		/* we also need to update agent ADDR only if it use the server's one */
 		if ((s->agent.state & CHK_ST_CONFIGURED) && (s->flags & SRV_F_AGENTADDR)) {
-			current_port = get_host_port(&s->agent.addr);
-			memset(&s->agent.addr, '\0', sizeof(s->agent.addr));
 			ipcpy(&sa, &s->agent.addr);
-			set_host_port(&s->agent.addr, current_port);
 		}
 
 		/* update report for caller */
@@ -2793,6 +2894,9 @@ out:
 int snr_update_srv_status(struct server *s)
 {
 	struct dns_resolution *resolution = s->resolution;
+	struct dns_resolvers *resolvers;
+
+	resolvers = resolution->resolvers;
 
 	switch (resolution->status) {
 		case RSLV_STATUS_NONE:
@@ -2800,7 +2904,59 @@ int snr_update_srv_status(struct server *s)
 			trigger_resolution(s);
 			break;
 
+		case RSLV_STATUS_VALID:
+			/*
+			 * resume health checks
+			 * server will be turned back on if health check is safe
+			 */
+			if (!(s->admin & SRV_ADMF_RMAINT))
+				return 1;
+			srv_clr_admin_flag(s, SRV_ADMF_RMAINT);
+			chunk_printf(&trash, "Server %s/%s administratively READY thanks to valid DNS answer",
+			             s->proxy->id, s->id);
+
+			Warning("%s.\n", trash.str);
+			send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
+			return 0;
+
+		case RSLV_STATUS_NX:
+			/* stop server if resolution is NX for a long enough period */
+			if (tick_is_expired(tick_add(resolution->last_status_change, resolvers->hold.nx), now_ms)) {
+				if (s->admin & SRV_ADMF_RMAINT)
+					return 1;
+				srv_set_admin_flag(s, SRV_ADMF_RMAINT, "DNS NX status");
+				return 0;
+			}
+			break;
+
+		case RSLV_STATUS_TIMEOUT:
+			/* stop server if resolution is TIMEOUT for a long enough period */
+			if (tick_is_expired(tick_add(resolution->last_status_change, resolvers->hold.timeout), now_ms)) {
+				if (s->admin & SRV_ADMF_RMAINT)
+					return 1;
+				srv_set_admin_flag(s, SRV_ADMF_RMAINT, "DNS timeout status");
+				return 0;
+			}
+			break;
+
+		case RSLV_STATUS_REFUSED:
+			/* stop server if resolution is REFUSED for a long enough period */
+			if (tick_is_expired(tick_add(resolution->last_status_change, resolvers->hold.refused), now_ms)) {
+				if (s->admin & SRV_ADMF_RMAINT)
+					return 1;
+				srv_set_admin_flag(s, SRV_ADMF_RMAINT, "DNS refused status");
+				return 0;
+			}
+			break;
+
 		default:
+			/* stop server if resolution is in unmatched error for a long enough period */
+			if (tick_is_expired(tick_add(resolution->last_status_change, resolvers->hold.other), now_ms)) {
+				if (s->admin & SRV_ADMF_RMAINT)
+					return 1;
+				srv_set_admin_flag(s, SRV_ADMF_RMAINT, "unspecified DNS error");
+				return 0;
+			}
 			break;
 	}
 
@@ -3047,6 +3203,142 @@ int snr_resolution_error_cb(struct dns_resolution *resolution, int error_code)
 	snr_update_srv_status(s);
 	return 1;
 }
+
+/* Sets the server's address (srv->addr) from srv->hostname using the libc's
+ * resolver. This is suited for initial address configuration. Returns 0 on
+ * success otherwise a non-zero error code. In case of error, *err_code, if
+ * not NULL, is filled up.
+ */
+int srv_set_addr_via_libc(struct server *srv, int *err_code)
+{
+	if (str2ip2(srv->hostname, &srv->addr, 1) == NULL) {
+		if (err_code)
+			*err_code |= ERR_WARN;
+		return 1;
+	}
+	return 0;
+}
+
+/* Sets the server's address (srv->addr) from srv->lastaddr which was filled
+ * from the state file. This is suited for initial address configuration.
+ * Returns 0 on success otherwise a non-zero error code. In case of error,
+ * *err_code, if not NULL, is filled up.
+ */
+static int srv_apply_lastaddr(struct server *srv, int *err_code)
+{
+	if (!str2ip2(srv->lastaddr, &srv->addr, 0)) {
+		if (err_code)
+			*err_code |= ERR_WARN;
+		return 1;
+	}
+	return 0;
+}
+
+/* returns 0 if no error, otherwise a combination of ERR_* flags */
+static int srv_iterate_initaddr(struct server *srv)
+{
+	int return_code = 0;
+	int err_code;
+	unsigned int methods;
+
+	methods = srv->init_addr_methods;
+	if (!methods) { // default to "last,libc"
+		srv_append_initaddr(&methods, SRV_IADDR_LAST);
+		srv_append_initaddr(&methods, SRV_IADDR_LIBC);
+	}
+
+	/* "-dr" : always append "none" so that server addresses resolution
+	 * failures are silently ignored, this is convenient to validate some
+	 * configs out of their environment.
+	 */
+	if (global.tune.options & GTUNE_RESOLVE_DONTFAIL)
+		srv_append_initaddr(&methods, SRV_IADDR_NONE);
+
+	while (methods) {
+		err_code = 0;
+		switch (srv_get_next_initaddr(&methods)) {
+		case SRV_IADDR_LAST:
+			if (!srv->lastaddr)
+				continue;
+			if (srv_apply_lastaddr(srv, &err_code) == 0)
+				return return_code;
+			return_code |= err_code;
+			break;
+
+		case SRV_IADDR_LIBC:
+			if (!srv->hostname)
+				continue;
+			if (srv_set_addr_via_libc(srv, &err_code) == 0)
+				return return_code;
+			return_code |= err_code;
+			break;
+
+		case SRV_IADDR_NONE:
+			srv_set_admin_flag(srv, SRV_ADMF_RMAINT, NULL);
+			if (return_code) {
+				Warning("parsing [%s:%d] : 'server %s' : could not resolve address '%s', disabling server.\n",
+					srv->conf.file, srv->conf.line, srv->id, srv->hostname);
+			}
+			return return_code;
+
+		case SRV_IADDR_IP:
+			ipcpy(&srv->init_addr, &srv->addr);
+			if (return_code) {
+				Warning("parsing [%s:%d] : 'server %s' : could not resolve address '%s', falling back to configured address.\n",
+					srv->conf.file, srv->conf.line, srv->id, srv->hostname);
+			}
+			return return_code;
+
+		default: /* unhandled method */
+			break;
+		}
+	}
+
+	if (!return_code) {
+		Alert("parsing [%s:%d] : 'server %s' : no method found to resolve address '%s'\n",
+		      srv->conf.file, srv->conf.line, srv->id, srv->hostname);
+	}
+	else {
+		Alert("parsing [%s:%d] : 'server %s' : could not resolve address '%s'.\n",
+		      srv->conf.file, srv->conf.line, srv->id, srv->hostname);
+	}
+
+	return_code |= ERR_ALERT | ERR_FATAL;
+	return return_code;
+}
+
+/*
+ * This function parses all backends and all servers within each backend
+ * and performs servers' addr resolution based on information provided by:
+ *   - configuration file
+ *   - server-state file (states provided by an 'old' haproxy process)
+ *
+ * Returns 0 if no error, otherwise, a combination of ERR_ flags.
+ */
+int srv_init_addr(void)
+{
+	struct proxy *curproxy;
+	int return_code = 0;
+
+	curproxy = proxy;
+	while (curproxy) {
+		struct server *srv;
+
+		/* servers are in backend only */
+		if (!(curproxy->cap & PR_CAP_BE))
+			goto srv_init_addr_next;
+
+		for (srv = curproxy->srv; srv; srv = srv->next)
+			if (srv->hostname)
+				return_code |= srv_iterate_initaddr(srv);
+
+ srv_init_addr_next:
+		curproxy = curproxy->next;
+	}
+
+	return return_code;
+}
+
 
 /*
  * Local variables:

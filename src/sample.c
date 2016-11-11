@@ -1127,6 +1127,7 @@ int smp_resolve_args(struct proxy *p)
 		case ARGC_CAP:   where = "in capture rule in"; break;
 		case ARGC_ACL:   ctx = "ACL keyword"; break;
 		case ARGC_SRV:   where = "in server directive in"; break;
+		case ARGC_SPOE:  where = "in spoe-message directive in"; break;
 		}
 
 		/* set a few default settings */
@@ -1380,6 +1381,46 @@ struct sample *sample_fetch_as_type(struct proxy *px, struct session *sess,
 
 	smp->flags &= ~SMP_F_MAY_CHANGE;
 	return smp;
+}
+
+static void release_sample_arg(struct arg *p)
+{
+	struct arg *p_back = p;
+
+	if (!p)
+		return;
+
+	while (p->type != ARGT_STOP) {
+		if (p->type == ARGT_STR || p->unresolved) {
+			free(p->data.str.str);
+			p->data.str.str = NULL;
+			p->unresolved = 0;
+		}
+		else if (p->type == ARGT_REG) {
+			if (p->data.reg) {
+				regex_free(p->data.reg);
+				free(p->data.reg);
+				p->data.reg = NULL;
+			}
+		}
+		p++;
+	}
+
+	if (p_back != empty_arg_list)
+		free(p_back);
+}
+
+void release_sample_expr(struct sample_expr *expr)
+{
+	struct sample_conv_expr *conv_expr, *conv_exprb;
+
+	if (!expr)
+		return;
+
+	list_for_each_entry_safe(conv_expr, conv_exprb, &expr->conv_exprs, list)
+		release_sample_arg(conv_expr->arg_p);
+	release_sample_arg(expr->arg_p);
+	free(expr);
 }
 
 /*****************************************************************/
@@ -2570,7 +2611,7 @@ static int smp_check_const_meth(struct arg *args, char **err)
 		 * token = 1*tchar
 		 */
 		for (i = 0; i < args[0].data.str.len; i++) {
-			if (!http_is_token[(unsigned char)args[0].data.str.str[i]]) {
+			if (!HTTP_IS_TOKEN(args[0].data.str.str[i])) {
 				memprintf(err, "expects valid method.");
 				return 0;
 			}

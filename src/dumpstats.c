@@ -1806,7 +1806,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 				char *addr = NULL;
 				char *port = NULL;
 				if (strlen(args[4]) == 0) {
-					appctx->ctx.cli.msg = "set server <b>/<s> requires an <addr> .\n";
+					appctx->ctx.cli.msg = "set server <b>/<s> addr requires an address and optionally a port.\n";
 					appctx->st0 = STAT_CLI_PRINT;
 					return 1;
 				}
@@ -1821,6 +1821,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 					appctx->ctx.cli.msg = warning;
 					appctx->st0 = STAT_CLI_PRINT;
 				}
+				srv_clr_admin_flag(sv, SRV_ADMF_RMAINT);
 			}
 			else {
 				appctx->ctx.cli.msg = "'set server <srv>' only supports 'agent', 'health', 'state', 'weight', 'addr' and 'check-port'.\n";
@@ -3799,7 +3800,10 @@ static int stats_dump_fields_html(struct chunk *out, const struct field *stats, 
 		              stats[ST_F_BCK].u.u32 ? "Y" : "-");
 
 		/* check failures: unique, fatal, down time */
-		if (stats[ST_F_CHKFAIL].type) {
+		if (strcmp(field_str(stats, ST_F_STATUS), "MAINT (resolution)") == 0) {
+			chunk_appendf(out, "<td class=ac colspan=3>resolution</td>");
+		}
+		else if (stats[ST_F_CHKFAIL].type) {
 			chunk_appendf(out, "<td><u>%lld", (long long)stats[ST_F_CHKFAIL].u.u64);
 
 			if (stats[ST_F_HANAFAIL].type)
@@ -4286,7 +4290,9 @@ int stats_fill_sv_stats(struct proxy *px, struct server *sv, int flags,
 
 	/* status */
 	fld_status = chunk_newstr(out);
-	if (sv->admin & SRV_ADMF_IMAINT)
+	if (sv->admin & SRV_ADMF_RMAINT)
+		chunk_appendf(out, "MAINT (resolution)");
+	else if (sv->admin & SRV_ADMF_IMAINT)
 		chunk_appendf(out, "MAINT (via %s/%s)", via->proxy->id, via->id);
 	else if (sv->admin & SRV_ADMF_MAINT)
 		chunk_appendf(out, "MAINT");
@@ -5472,7 +5478,7 @@ static int stats_process_http_post(struct stream_interface *si)
 						if (!(sv->admin & SRV_ADMF_FMAINT)) {
 							altered_servers++;
 							total_servers++;
-							srv_set_admin_flag(sv, SRV_ADMF_FMAINT);
+							srv_set_admin_flag(sv, SRV_ADMF_FMAINT, "'disable' on stats page");
 						}
 						break;
 					case ST_ADM_ACTION_ENABLE:
@@ -5484,7 +5490,7 @@ static int stats_process_http_post(struct stream_interface *si)
 						break;
 					case ST_ADM_ACTION_STOP:
 						if (!(sv->admin & SRV_ADMF_FDRAIN)) {
-							srv_set_admin_flag(sv, SRV_ADMF_FDRAIN);
+							srv_set_admin_flag(sv, SRV_ADMF_FDRAIN, "'stop' on stats page");
 							altered_servers++;
 							total_servers++;
 						}

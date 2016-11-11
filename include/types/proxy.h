@@ -77,8 +77,7 @@ enum PR_SRV_STATE_FILE {
 #define PR_CAP_NONE    0x0000
 #define PR_CAP_FE      0x0001
 #define PR_CAP_BE      0x0002
-#define PR_CAP_RS      0x0004
-#define PR_CAP_LISTEN  (PR_CAP_FE|PR_CAP_BE|PR_CAP_RS)
+#define PR_CAP_LISTEN  (PR_CAP_FE|PR_CAP_BE)
 
 /* bits for proxy->options */
 #define PR_O_REDISP     0x00000001      /* allow reconnection to dispatch in case of errors */
@@ -174,7 +173,8 @@ enum PR_SRV_STATE_FILE {
 #define PR_O2_LB_AGENT_CHK 0x80000000   /* use a TCP connection to obtain a metric of server health */
 #define PR_O2_TCPCHK_CHK 0x90000000     /* use TCPCHK check for server health */
 #define PR_O2_EXT_CHK   0xA0000000      /* use external command for server health */
-/* unused: 0xB0000000 to 0xF000000, reserved for health checks */
+#define PR_O2_SPOP_CHK  0xB0000000      /* use SPOP for server health */
+/* unused: 0xC0000000 to 0xF000000, reserved for health checks */
 #define PR_O2_CHK_ANY   0xF0000000      /* Mask to cover any check */
 /* end of proxy->options2 */
 

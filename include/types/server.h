@@ -76,11 +76,27 @@ enum srv_state {
 enum srv_admin {
 	SRV_ADMF_FMAINT    = 0x01,        /* the server was explicitly forced into maintenance */
 	SRV_ADMF_IMAINT    = 0x02,        /* the server has inherited the maintenance status from a tracked server */
-	SRV_ADMF_MAINT     = 0x03,        /* mask to check if any maintenance flag is present */
+	SRV_ADMF_MAINT     = 0x23,        /* mask to check if any maintenance flag is present */
 	SRV_ADMF_CMAINT    = 0x04,        /* the server is in maintenance because of the configuration */
 	SRV_ADMF_FDRAIN    = 0x08,        /* the server was explicitly forced into drain state */
 	SRV_ADMF_IDRAIN    = 0x10,        /* the server has inherited the drain status from a tracked server */
 	SRV_ADMF_DRAIN     = 0x18,        /* mask to check if any drain flag is present */
+	SRV_ADMF_RMAINT    = 0x20,        /* the server is down because of an IP address resolution failure */
+};
+
+/* options for servers' "init-addr" parameter
+ * this parameter may be used to drive HAProxy's behavior when parsing a server
+ * address at start up time.
+ * These values are stored as a list into an integer ordered from first to last
+ * starting with the lowest to highest bits. SRV_IADDR_END (0) is used to
+ * indicate the end of the list. 3 bits are enough to store each value.
+ */
+enum srv_initaddr {
+	SRV_IADDR_END      = 0,           /* end of the list */
+	SRV_IADDR_NONE     = 1,           /* the server won't have any address at start up */
+	SRV_IADDR_LIBC     = 2,           /* address set using the libc DNS resolver */
+	SRV_IADDR_LAST     = 3,           /* we set the IP address found in state-file for this server */
+	SRV_IADDR_IP       = 4,           /* we set an arbitrary IP address to the server */
 };
 
 /* server-state-file version */
@@ -227,8 +243,11 @@ struct server {
 
 	char *resolvers_id;			/* resolvers section used by this server */
 	char *hostname;				/* server hostname */
+	char *lastaddr;				/* the address string provided by the server-state file */
 	struct dns_resolution *resolution;	/* server name resolution */
 	struct dns_options dns_opts;
+	struct sockaddr_storage init_addr;	/* plain IP address specified on the init-addr line */
+	unsigned int init_addr_methods;		/* initial address setting, 3-bit per method, ends at 0, enough to store 10 entries */
 
 #ifdef USE_OPENSSL
 	int use_ssl;				/* ssl enabled */

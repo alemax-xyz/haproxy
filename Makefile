@@ -39,6 +39,7 @@
 #   USE_DL               : enable it if your system requires -ldl. Automatic on Linux.
 #   USE_DEVICEATLAS      : enable DeviceAtlas api.
 #   USE_51DEGREES        : enable third party device detection library from 51Degrees
+#   USE_WURFL            : enable WURFL detection library from Scientiamobile
 #
 # Options can be forced by specifying "USE_xxx=1" or can be disabled by using
 # "USE_xxx=" (empty string).
@@ -143,8 +144,8 @@ SMALL_OPTS =
 #### Debug settings
 # You can enable debugging on specific code parts by setting DEBUG=-DDEBUG_xxx.
 # Currently defined DEBUG macros include DEBUG_FULL, DEBUG_MEMORY, DEBUG_FSM,
-# DEBUG_HASH and DEBUG_AUTH. Please check sources for exact meaning or do not
-# use at all.
+# DEBUG_HASH, DEBUG_AUTH and DEBUG_SPOE. Please check sources for exact meaning
+# or do not use at all.
 DEBUG =
 
 #### Trace options
@@ -578,6 +579,9 @@ ifneq ($(USE_OPENSSL),)
 BUILD_OPTIONS   += $(call ignore_implicit,USE_OPENSSL)
 OPTIONS_CFLAGS  += -DUSE_OPENSSL $(if $(SSL_INC),-I$(SSL_INC))
 OPTIONS_LDFLAGS += $(if $(SSL_LIB),-L$(SSL_LIB)) -lssl -lcrypto
+ifneq ($(USE_DL),)
+OPTIONS_LDFLAGS += -ldl
+endif
 OPTIONS_OBJS  += src/ssl_sock.o src/shctx.o
 ifneq ($(USE_PRIVATE_CACHE),)
 OPTIONS_CFLAGS  += -DUSE_PRIVATE_CACHE
@@ -646,6 +650,24 @@ OPTIONS_OBJS    += src/51d.o
 OPTIONS_CFLAGS  += -DUSE_51DEGREES -DFIFTYONEDEGREES_NO_THREADING $(if $(51DEGREES_INC),-I$(51DEGREES_INC))
 BUILD_OPTIONS   += $(call ignore_implicit,USE_51DEGREES)
 OPTIONS_LDFLAGS += $(if $(51DEGREES_LIB),-L$(51DEGREES_LIB)) -lm
+endif
+
+ifneq ($(USE_WURFL),)
+# Use WURFL_SRC and possibly WURFL_INC and WURFL_LIB to force path
+# to WURFL headers and libraries if needed.
+WURFL_SRC =
+WURFL_INC = $(WURFL_SRC)
+WURFL_LIB = $(WURFL_SRC)
+OPTIONS_OBJS    += src/wurfl.o
+OPTIONS_CFLAGS  += -DUSE_WURFL $(if $(WURFL_INC),-I$(WURFL_INC))
+ifneq ($(WURFL_DEBUG),)
+OPTIONS_CFLAGS  += -DWURFL_DEBUG
+endif
+ifneq ($(WURFL_HEADER_WITH_DETAILS),)
+OPTIONS_CFLAGS  += -DWURFL_HEADER_WITH_DETAILS
+endif
+BUILD_OPTIONS   += $(call ignore_implicit,USE_WURFL)
+OPTIONS_LDFLAGS += $(if $(WURFL_LIB),-L$(WURFL_LIB)) -lwurfl
 endif
 
 ifneq ($(USE_PCRE)$(USE_STATIC_PCRE)$(USE_PCRE_JIT),)
@@ -756,7 +778,7 @@ OBJS = src/haproxy.o src/base64.o src/protocol.o \
        src/acl.o src/sample.o src/memory.o src/freq_ctr.o src/auth.o src/proto_udp.o \
        src/compression.o src/payload.o src/hash.o src/pattern.o src/map.o \
        src/namespace.o src/mailers.o src/dns.o src/vars.o src/filters.o \
-       src/flt_http_comp.o src/flt_trace.o
+       src/flt_http_comp.o src/flt_trace.o src/flt_spoe.o
 
 EBTREE_OBJS = $(EBTREE_DIR)/ebtree.o \
               $(EBTREE_DIR)/eb32tree.o $(EBTREE_DIR)/eb64tree.o \

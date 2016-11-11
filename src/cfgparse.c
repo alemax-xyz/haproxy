@@ -205,6 +205,7 @@ static char *cursection = NULL;
 static struct proxy defproxy;		/* fake proxy used to assign default values on all instances */
 int cfg_maxpconn = DEFAULT_MAXCONN;	/* # of simultaneous connections per proxy (-N) */
 int cfg_maxconn = 0;			/* # of simultaneous connections, (-n) */
+char *cfg_scope = NULL;                 /* the current scope during the configuration parsing */
 
 /* List head of all known configuration keywords */
 static struct cfg_kw_list cfg_keywords = {
@@ -2040,7 +2041,7 @@ static int create_cond_regex_rule(const char *file, int line,
 		goto err;
 	}
 
-	if (warnifnotcap(px, PR_CAP_RS, file, line, cmd, NULL))
+	if (warnifnotcap(px, PR_CAP_FE | PR_CAP_BE, file, line, cmd, NULL))
 		ret_code |= ERR_WARN;
 
 	if (cond_start &&
@@ -2363,6 +2364,11 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 		curr_resolvers->conf.line = linenum;
 		curr_resolvers->id = strdup(args[1]);
 		curr_resolvers->query_ids = EB_ROOT;
+		/* default hold period for nx, other, refuse and timeout is 30s */
+		curr_resolvers->hold.nx = 30000;
+		curr_resolvers->hold.other = 30000;
+		curr_resolvers->hold.refused = 30000;
+		curr_resolvers->hold.timeout = 30000;
 		/* default hold period for valid is 10s */
 		curr_resolvers->hold.valid = 10000;
 		curr_resolvers->timeout.retry = 1000;
@@ -2462,11 +2468,19 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		if (strcmp(args[1], "valid") == 0)
+		if (strcmp(args[1], "nx") == 0)
+			curr_resolvers->hold.nx = time;
+		else if (strcmp(args[1], "other") == 0)
+			curr_resolvers->hold.other = time;
+		else if (strcmp(args[1], "refused") == 0)
+			curr_resolvers->hold.refused = time;
+		else if (strcmp(args[1], "timeout") == 0)
+			curr_resolvers->hold.timeout = time;
+		else if (strcmp(args[1], "valid") == 0)
 			curr_resolvers->hold.valid = time;
 		else {
-			Alert("parsing [%s:%d] : '%s' unknown <event>: '%s', expects 'valid'\n",
-			file, linenum, args[0], args[1]);
+			Alert("parsing [%s:%d] : '%s' unknown <event>: '%s', expects either 'nx', 'timeout', 'valid', or 'other'.\n",
+				file, linenum, args[0], args[1]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -2730,9 +2744,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 	if (!strcmp(args[0], "listen"))
 		rc = PR_CAP_LISTEN;
  	else if (!strcmp(args[0], "frontend"))
-		rc = PR_CAP_FE | PR_CAP_RS;
+		rc = PR_CAP_FE;
 	else if (!strcmp(args[0], "backend"))
-		rc = PR_CAP_BE | PR_CAP_RS;
+		rc = PR_CAP_BE;
 	else
 		rc = PR_CAP_NONE;
 
@@ -5104,6 +5118,34 @@ stats_error_parsing:
 			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
 				goto out;
 		}
+		else if (!strcmp(args[1], "spop-check")) {
+			if (curproxy == &defproxy) {
+				Alert("parsing [%s:%d] : '%s %s' not allowed in 'defaults' section.\n",
+				      file, linenum, args[0], args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			if (curproxy->cap & PR_CAP_FE) {
+				Alert("parsing [%s:%d] : '%s %s' not allowed in 'frontend' and 'listen' sections.\n",
+				      file, linenum, args[0], args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+
+			/* use SPOE request to check servers' health */
+			free(curproxy->check_req);
+			curproxy->check_req = NULL;
+			curproxy->options2 &= ~PR_O2_CHK_ANY;
+			curproxy->options2 |= PR_O2_SPOP_CHK;
+
+			if (prepare_spoe_healthcheck_request(&curproxy->check_req, &curproxy->check_len)) {
+				Alert("parsing [%s:%d] : failed to prepare SPOP healthcheck request.\n", file, linenum);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
+		}
 		else if (!strcmp(args[1], "tcp-check")) {
 			/* use raw TCPCHK send/expect to check servers' health */
 			if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[1], NULL))
@@ -6489,7 +6531,7 @@ stats_error_parsing:
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		else if (warnifnotcap(curproxy, PR_CAP_RS, file, linenum, args[0], NULL))
+		else if (warnifnotcap(curproxy, PR_CAP_FE | PR_CAP_BE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
 
 		if (*(args[1]) == 0) {
@@ -6586,7 +6628,7 @@ stats_error_parsing:
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		else if (warnifnotcap(curproxy, PR_CAP_RS, file, linenum, args[0], NULL))
+		else if (warnifnotcap(curproxy, PR_CAP_FE | PR_CAP_BE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
 
 		if (*(args[1]) == 0) {
@@ -6993,6 +7035,55 @@ out:
 	return err_code;
 }
 
+int
+cfg_parse_scope(const char *file, int linenum, char *line)
+{
+	char *beg, *end, *scope = NULL;
+	int err_code = 0;
+	const char *err;
+
+	beg = line + 1;
+	end = strchr(beg, ']');
+
+	/* Detect end of scope declaration */
+	if (!end || end == beg) {
+		Alert("parsing [%s:%d] : empty scope name is forbidden.\n",
+		      file, linenum);
+		err_code |= ERR_ALERT | ERR_FATAL;
+		goto out;
+	}
+
+	/* Get scope name and check its validity */
+	scope = my_strndup(beg, end-beg);
+	err = invalid_char(scope);
+	if (err) {
+		Alert("parsing [%s:%d] : character '%c' is not permitted in a scope name.\n",
+		      file, linenum, *err);
+		err_code |= ERR_ALERT | ERR_ABORT;
+		goto out;
+	}
+
+	/* Be sure to have a scope declaration alone on its line */
+	line = end+1;
+	while (isspace((unsigned char)*line))
+		line++;
+	if (*line && *line != '#' && *line != '\n' && *line != '\r') {
+		Alert("parsing [%s:%d] : character '%c' is not permitted after scope declaration.\n",
+		      file, linenum, *line);
+		err_code |= ERR_ALERT | ERR_ABORT;
+		goto out;
+	}
+
+	/* We have a valid scope declaration, save it */
+	free(cfg_scope);
+	cfg_scope = scope;
+	scope = NULL;
+
+  out:
+	free(scope);
+	return err_code;
+}
+
 /*
  * This function reads and parses the configuration file given in the argument.
  * Returns the error code, 0 if OK, or any combination of :
@@ -7063,6 +7154,12 @@ next_line:
 		/* skip leading spaces */
 		while (isspace((unsigned char)*line))
 			line++;
+
+
+		if (*line == '[') {/* This is the begining if a scope */
+			err_code |= cfg_parse_scope(file, linenum, line);
+			goto next_line;
+		}
 
 		arg = 0;
 		args[arg] = line;
@@ -7315,6 +7412,8 @@ next_line:
 		if (err_code & ERR_ABORT)
 			break;
 	}
+	free(cfg_scope);
+	cfg_scope = NULL;
 	cursection = NULL;
 	free(thisline);
 	fclose(f);
@@ -8450,13 +8549,6 @@ out_uri_auth_compat:
 					goto next_srv;
 				}
 
-				/* if the other server is forced disabled, we have to do the same here */
-				if (srv->admin & SRV_ADMF_MAINT) {
-					newsrv->admin |= SRV_ADMF_IMAINT;
-					newsrv->state = SRV_ST_STOPPED;
-					newsrv->check.health = 0;
-				}
-
 				newsrv->track = srv;
 				newsrv->tracknext = srv->trackers;
 				srv->trackers = newsrv;
@@ -9249,6 +9341,26 @@ void cfg_unregister_sections(void)
 	list_for_each_entry_safe(cs, ics, &sections, list) {
 		LIST_DEL(&cs->list);
 		free(cs);
+	}
+}
+
+void cfg_backup_sections(struct list *backup_sections)
+{
+	struct cfg_section *cs, *ics;
+
+	list_for_each_entry_safe(cs, ics, &sections, list) {
+		LIST_DEL(&cs->list);
+		LIST_ADDQ(backup_sections, &cs->list);
+	}
+}
+
+void cfg_restore_sections(struct list *backup_sections)
+{
+	struct cfg_section *cs, *ics;
+
+	list_for_each_entry_safe(cs, ics, backup_sections, list) {
+		LIST_DEL(&cs->list);
+		LIST_ADDQ(&sections, &cs->list);
 	}
 }
 

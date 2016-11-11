@@ -625,13 +625,14 @@ const char *invalid_domainchar(const char *name) {
  * all other fields remain zero. The string is not supposed to be modified.
  * The IPv6 '::' address is IN6ADDR_ANY. If <resolve> is non-zero, the hostname
  * is resolved, otherwise only IP addresses are resolved, and anything else
- * returns NULL.
+ * returns NULL. If the address contains a port, this one is preserved.
  */
 struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, int resolve)
 {
 	struct hostent *he;
 	/* max IPv6 length, including brackets and terminating NULL */
 	char tmpip[48];
+	int port = get_host_port(sa);
 
 	/* check IPv6 with square brackets */
 	if (str[0] == '[') {
@@ -664,6 +665,7 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 			sa->ss_family = AF_INET6;
 		else if (sa->ss_family != AF_INET6)
 			goto fail;
+		set_host_port(sa, port);
 		return sa;
 	}
 
@@ -671,6 +673,7 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 	if (!str[0] || (str[0] == '*' && !str[1])) {
 		if (!sa->ss_family || sa->ss_family == AF_UNSPEC)
 			sa->ss_family = AF_INET;
+		set_host_port(sa, port);
 		return sa;
 	}
 
@@ -678,6 +681,7 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 	if ((!sa->ss_family || sa->ss_family == AF_UNSPEC || sa->ss_family == AF_INET6) &&
 	    inet_pton(AF_INET6, str, &((struct sockaddr_in6 *)sa)->sin6_addr)) {
 		sa->ss_family = AF_INET6;
+		set_host_port(sa, port);
 		return sa;
 	}
 
@@ -685,6 +689,7 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 	if ((!sa->ss_family || sa->ss_family == AF_UNSPEC || sa->ss_family == AF_INET) &&
 	    inet_pton(AF_INET, str, &((struct sockaddr_in *)sa)->sin_addr)) {
 		sa->ss_family = AF_INET;
+		set_host_port(sa, port);
 		return sa;
 	}
 
@@ -714,9 +719,11 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 			switch (result->ai_family) {
 			case AF_INET:
 				memcpy((struct sockaddr_in *)sa, result->ai_addr, result->ai_addrlen);
+				set_host_port(sa, port);
 				return sa;
 			case AF_INET6:
 				memcpy((struct sockaddr_in6 *)sa, result->ai_addr, result->ai_addrlen);
+				set_host_port(sa, port);
 				return sa;
 			}
 		}
@@ -736,9 +743,11 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 		switch (sa->ss_family) {
 		case AF_INET:
 			((struct sockaddr_in *)sa)->sin_addr = *(struct in_addr *) *(he->h_addr_list);
+			set_host_port(sa, port);
 			return sa;
 		case AF_INET6:
 			((struct sockaddr_in6 *)sa)->sin6_addr = *(struct in6_addr *) *(he->h_addr_list);
+			set_host_port(sa, port);
 			return sa;
 		}
 	}
@@ -799,7 +808,10 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
  *     that the caller will have to free(),
  *   - NULL if there was an explicit address that doesn't require resolution.
  *
- * Hostnames are only resolved if <resolve> is non-null.
+ * Hostnames are only resolved if <resolve> is non-null. Note that if <resolve>
+ * is null, <fqdn> is still honnored so it is possible for the caller to know
+ * whether a resolution failed by setting <resolve> to null and checking if
+ * <fqdn> was filled, indicating the need for a resolution.
  *
  * When a file descriptor is passed, its value is put into the s_addr part of
  * the address when cast to sockaddr_in and the address family is AF_UNSPEC.
@@ -893,7 +905,6 @@ struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char
 		memcpy(((struct sockaddr_un *)&ss)->sun_path + prefix_path_len + abstract, str2, adr_len + 1 - abstract);
 	}
 	else { /* IPv4 and IPv6 */
-		int use_fqdn = 0;
 		char *end = str2 + strlen(str2);
 		char *chr;
 
@@ -918,14 +929,6 @@ struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char
 			port1 = "";
 		}
 
-		if (str2ip2(str2, &ss, 0) == NULL) {
-			use_fqdn = 1;
-			if (!resolve || str2ip2(str2, &ss, 1) == NULL) {
-				memprintf(err, "invalid address: '%s' in '%s'\n", str2, str);
-				goto out;
-			}
-		}
-
 		if (isdigit((int)(unsigned char)*port1)) {	/* single port or range */
 			port2 = strchr(port1, '-');
 			if (port2)
@@ -948,14 +951,34 @@ struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char
 			memprintf(err, "invalid character '%c' in port number '%s' in '%s'\n", *port1, port1, str);
 			goto out;
 		}
-		set_host_port(&ss, porta);
 
-		if (use_fqdn && fqdn) {
-			if (str2 != back)
-				memmove(back, str2, strlen(str2) + 1);
-			*fqdn = back;
-			back = NULL;
+		/* first try to parse the IP without resolving. If it fails, it
+		 * tells us we need to keep a copy of the FQDN to resolve later
+		 * and to enable DNS. In this case we can proceed if <fqdn> is
+		 * set or if resolve is set, otherwise it's an error.
+		 */
+		if (str2ip2(str2, &ss, 0) == NULL) {
+			if (!resolve && fqdn) {
+				/* we'll still want to store the port, so let's
+				 * force it to IPv4 for now.
+				 */
+				memset(&ss, 0, sizeof(ss));
+				ss.ss_family = AF_INET;
+			}
+			else if ((!resolve && !fqdn) ||
+				 (resolve && str2ip2(str2, &ss, 1) == NULL)) {
+				memprintf(err, "invalid address: '%s' in '%s'\n", str2, str);
+				goto out;
+			}
+
+			if (fqdn) {
+				if (str2 != back)
+					memmove(back, str2, strlen(str2) + 1);
+				*fqdn = back;
+				back = NULL;
+			}
 		}
+		set_host_port(&ss, porta);
 	}
 
 	ret = &ss;
@@ -2589,20 +2612,29 @@ int ipcmp(struct sockaddr_storage *ss1, struct sockaddr_storage *ss2)
 }
 
 /* copy IP address from <source> into <dest>
- * the caller must allocate and clear <dest> before calling.
- * Returns a pointer to the destination.
+ * The caller must allocate and clear <dest> before calling.
+ * The source must be in either AF_INET or AF_INET6 family, or the destination
+ * address will be undefined. If the destination address used to hold a port,
+ * it is preserved, so that this function can be used to switch to another
+ * address family with no risk. Returns a pointer to the destination.
  */
 struct sockaddr_storage *ipcpy(struct sockaddr_storage *source, struct sockaddr_storage *dest)
 {
+	int prev_port;
+
+	prev_port = get_net_port(dest);
+	memset(dest, 0, sizeof(*dest));
 	dest->ss_family = source->ss_family;
 
 	/* copy new addr and apply it */
 	switch (source->ss_family) {
 		case AF_INET:
 			((struct sockaddr_in *)dest)->sin_addr.s_addr = ((struct sockaddr_in *)source)->sin_addr.s_addr;
+			((struct sockaddr_in *)dest)->sin_port = prev_port;
 			break;
 		case AF_INET6:
 			memcpy(((struct sockaddr_in6 *)dest)->sin6_addr.s6_addr, ((struct sockaddr_in6 *)source)->sin6_addr.s6_addr, sizeof(struct in6_addr));
+			((struct sockaddr_in6 *)dest)->sin6_port = prev_port;
 			break;
 	}
 
